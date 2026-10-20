@@ -2,8 +2,9 @@ import sys
 import copy
 import types
 import io
-from typing import Any, Generator
-from contextlib import contextmanager
+from typing import Any
+from types import MappingProxyType
+from deepdiff import DeepDiff
 
 def safe_deepcopy(obj: Any) -> Any:
     uncopyable_types = (
@@ -22,8 +23,9 @@ def safe_deepcopy(obj: Any) -> Any:
 
 class ExecutionTracer:
     def __init__(self, max_steps: int = 10000) -> None:
-        self.history: list[dict[str, Any]] = []
+        self.history: list[MappingProxyType[str, Any]] = []
         self.max_steps: int = max_steps
+        self._prev_locals: dict[str, Any] = {}
 
     def trace_handler(self, frame: types.FrameType, event: str, arg: Any) -> Any:
         func_name = frame.f_code.co_name
@@ -34,17 +36,33 @@ class ExecutionTracer:
             return None
 
         if event == 'line':
-            local_snapshot = {
+            current_locals = {
                 var_name: safe_deepcopy(val)
                 for var_name, val in frame.f_locals.items()
                 if not var_name.startswith('__')
             }
             
-            self.history.append(frozendict({
-                'function': func_name,
-                'line': frame.f_lineno,
-                'locals': local_snapshot
-            }))
+            if not self.history:
+                diff_data = {"event_type": "INITIAL", "details": "Initial scope capture", "locals": current_locals}
+                self.history.append(MappingProxyType({
+                    'function': func_name,
+                    'line': frame.f_lineno,
+                    'diff': diff_data
+                }))
+            else:
+                diff_result = DeepDiff(self._prev_locals, current_locals, ignore_order=True)
+                if diff_result:
+                    diff_dict = diff_result.to_dict()
+                    
+                    if diff_dict:
+                        diff_data = {"event_type": "MUTATION", "changes": diff_dict}
+                        self.history.append(MappingProxyType({
+                            'function': func_name,
+                            'line': frame.f_lineno,
+                            'diff': diff_data
+                        }))
+            
+            self._prev_locals = current_locals
             
         return self.trace_handler
 
@@ -55,16 +73,3 @@ class ExecutionTracer:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         sys.settrace(None)
 
-if __name__ == "__main__":
-    def calculate_basket(items: list[float]) -> float:
-        total = 0.0
-        tax_rate = 0.05
-        for price in items:
-            total += price + (price * tax_rate)
-        return total
-
-    with ExecutionTracer() as tracer:
-        calculate_basket([100, 200])
-
-    for step in tracer.history:
-        print(f"Line {step['line']:<3} | Func: {step['function']:<16} | Locals: {step['locals']}")
